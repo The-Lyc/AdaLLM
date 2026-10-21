@@ -372,3 +372,28 @@ def test_staged_per_layer_analysis_accepts_single_runkv_run(
     assert "--runkv-mfu" in commands[0]
     assert "--runkv-sqlite" in commands[0]
     assert "--tightllm-mfu" not in commands[0]
+
+
+def test_io_contention_component_ablation_uses_staged_opt_config() -> None:
+    result = _run(
+        "scripts/run_io_contention_component_ablation.py",
+        "--dry-run",
+        "--workloads",
+        "1k",
+        "--run-tag",
+        "unit",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.count("RESOURCE: kind=io") == 5
+    assert "bs=32 prompt=1000 decode=128" in result.stdout
+    assert "pattern=0:24,16:12,32:8" in result.stdout
+    assert "mode=process" in result.stdout
+    assert "io_max_gbps=24.0" in result.stdout
+    assert "placement=external_sibling" in result.stdout
+    assert "PROFILE-SCOPE: runkv_main_process_only" in result.stdout
+    assert "benchmarks.runkv_resource_pressure.server" in result.stdout
+    assert "RESOURCE_PRESSURE_EXTERNAL_PROCESS_SOCKET" in result.stdout
+    assert "h2d_copy=segment" in result.stdout
+    assert "h2d_copy=gather" in result.stdout
+    assert "h2d_copy=uva" in result.stdout
