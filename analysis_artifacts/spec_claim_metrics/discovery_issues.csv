@@ -1,0 +1,2 @@
+path,reason
+/home/lyc/inference/vllm/exp_results/opt_feedback_observation/opt_component_mfu_10000_20260827_181155.flat.jsonl,root has no manifest.json with an explicit Spec switch; flat trace is not safe to pair

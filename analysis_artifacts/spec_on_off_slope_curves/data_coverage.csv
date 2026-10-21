@@ -1,0 +1,7 @@
+model,environment,spec_on_runs,spec_off_runs,strictly_matched_setting_pairs,selected_latest_pairs
+Llama-2-7B,io_contention,4,0,0,0
+Llama-2-7B,stable,12,0,0,0
+OPT-1.3B,io_contention,2,0,0,0
+OPT-2.7B,io_contention,59,6,5,4
+OPT-2.7B,stable,25,7,7,4
+OPT-6.7B,io_contention,12,0,0,0
