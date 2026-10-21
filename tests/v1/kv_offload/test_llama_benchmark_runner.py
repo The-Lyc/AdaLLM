@@ -131,6 +131,83 @@ def test_prompt_word_environment_override_is_forwarded(
     assert _option_value(captured["command"], "--prompt-word") == "custom"
 
 
+def test_feedback_observation_forwards_resource_pressure_environment(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    output_dir = tmp_path / "output"
+    manifest_path = tmp_path / "manifest.json"
+    pressure_log = output_dir / "pressure.csv"
+    pressure_step_log = output_dir / "resource_steps.jsonl"
+    pressure_socket = tmp_path / "pressure.sock"
+    step_metrics = output_dir / "step_metrics.jsonl"
+    monkeypatch.setenv("OUTPUT_DIR", str(output_dir))
+    monkeypatch.setenv("MANIFEST_FILE", str(manifest_path))
+    monkeypatch.setenv("RUN_TAG", "unit")
+    monkeypatch.setenv("ENABLE_NSYS", "0")
+    monkeypatch.setenv("RESOURCE_PRESSURE_KIND", "io")
+    monkeypatch.setenv("RESOURCE_PRESSURE_CLOCK", "step")
+    monkeypatch.setenv("RESOURCE_PRESSURE_PATTERN", "0:24,16:12,32:8")
+    monkeypatch.setenv("RESOURCE_PRESSURE_MODE", "process")
+    monkeypatch.setenv("RESOURCE_PRESSURE_DIRECTION", "h2d")
+    monkeypatch.setenv("RESOURCE_PRESSURE_IO_MAX_GBPS", "24.0")
+    monkeypatch.setenv(
+        "RESOURCE_PRESSURE_EXTERNAL_PROCESS_SOCKET", str(pressure_socket)
+    )
+    monkeypatch.setenv(
+        "RESOURCE_PRESSURE_PROCESS_PLACEMENT", "external_sibling"
+    )
+    monkeypatch.setenv("NSYS_PROFILE_SCOPE", "runkv_main_process_only")
+    monkeypatch.setenv("RESOURCE_PRESSURE_LOG_PATH", str(pressure_log))
+    monkeypatch.setenv(
+        "RESOURCE_PRESSURE_STEP_LOG_PATH", str(pressure_step_log)
+    )
+    monkeypatch.setenv("STEP_METRICS_PATH", str(step_metrics))
+
+    captured: dict[str, list[str]] = {}
+
+    def fake_run(command, *, env, check):
+        del env
+        assert check is True
+        captured["command"] = command
+
+    monkeypatch.setattr(run_opt_feedback_observation.subprocess, "run", fake_run)
+    run_opt_feedback_observation.run_feedback_observation(
+        run_opt_feedback_observation.OPT_OBSERVATION_DEFAULTS,
+        passthrough_args=[],
+    )
+
+    command = captured["command"]
+    assert _option_value(command, "--resource-pressure-kind") == "io"
+    assert _option_value(command, "--resource-pressure-clock") == "step"
+    assert (
+        _option_value(command, "--resource-pressure-pattern")
+        == "0:24,16:12,32:8"
+    )
+    assert _option_value(command, "--resource-pressure-mode") == "process"
+    assert _option_value(command, "--resource-pressure-direction") == "h2d"
+    assert _option_value(command, "--resource-pressure-io-max-gbps") == "24.0"
+    assert _option_value(
+        command, "--resource-pressure-external-process-socket"
+    ) == str(pressure_socket)
+    assert _option_value(command, "--resource-pressure-log-path") == str(
+        pressure_log
+    )
+    assert _option_value(command, "--resource-pressure-step-log-path") == str(
+        pressure_step_log
+    )
+    assert _option_value(command, "--step-metrics-path") == str(step_metrics)
+
+    manifest = json.loads(manifest_path.read_text())
+    assert manifest["resource_pressure_kind"] == "io"
+    assert manifest["resource_pressure_pattern"] == "0:24,16:12,32:8"
+    assert manifest["resource_pressure_mode"] == "process"
+    assert manifest["resource_pressure_io_max_gbps"] == "24.0"
+    assert manifest["resource_pressure_process_placement"] == "external_sibling"
+    assert manifest["nsys_profile_scope"] == "runkv_main_process_only"
+    assert manifest["step_metrics_path"] == str(step_metrics)
+
+
 def test_tightllm_observation_builds_llama_command_and_manifest(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

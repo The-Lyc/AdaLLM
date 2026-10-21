@@ -16,11 +16,12 @@ import csv
 import json
 import math
 import multiprocessing as mp
+import socket
 import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import BinaryIO, Literal
 
 import torch
 
@@ -142,6 +143,7 @@ class ResourcePressureConfig:
     io_max_gbps: float | None = None
     mode: PressureMode = "thread"
     inline_layer_period_ms: float = 5.0
+    external_process_socket: str | None = None
 
 
 class ResourcePressureController:
@@ -172,6 +174,8 @@ class ResourcePressureController:
         self._process_worker_count = 0
         self._max_process_worker_count = 0
         self._current_actual_target = 0.0
+        self._external_process_client: socket.socket | None = None
+        self._external_process_reader: BinaryIO | None = None
 
     @staticmethod
     def _parse_pattern(pattern: str) -> list[tuple[float, float]]:
@@ -190,18 +194,31 @@ class ResourcePressureController:
     def prepare(self) -> None:
         if not torch.cuda.is_available():
             raise RuntimeError("Resource pressure requires CUDA.")
-        torch.cuda.set_device(self._device)
-        self._stream = torch.cuda.Stream(device=self._device)
+        process_io_without_local_calibration = (
+            self.config.mode == "process"
+            and self.config.kind == "io"
+            and (
+                self.config.external_process_socket is not None
+                or (
+                    self.config.io_max_gbps is not None
+                    and self.config.io_max_gbps > 0
+                )
+            )
+        )
+        if not process_io_without_local_calibration:
+            torch.cuda.set_device(self._device)
+            self._stream = torch.cuda.Stream(device=self._device)
         if self.config.kind == "io":
             if self.config.io_max_gbps and self.config.io_max_gbps > 0:
                 self._io_capacity_gbps = float(self.config.io_max_gbps)
-            if (
-                self.config.mode != "process"
-                or self._io_capacity_gbps is None
+            needs_local_io_calibration = (
+                self._io_capacity_gbps is None
                 and self.config.io_calibration_s > 0
-            ):
+                and not self.config.external_process_socket
+            )
+            if self.config.mode != "process" or needs_local_io_calibration:
                 self._prepare_io_buffers()
-            if self._io_capacity_gbps is None and self.config.io_calibration_s > 0:
+            if needs_local_io_calibration:
                 self._io_capacity_gbps = self._calibrate_io_gbps()
         elif self.config.kind == "sm":
             self._cycles_per_ms = calibrate_cycles_per_ms(self._device)
@@ -214,6 +231,29 @@ class ResourcePressureController:
                 raise ValueError("resource pressure mode 'throttle' only supports IO.")
             self._throttle = IOBandwidthThrottle()
         if self.config.mode == "process":
+            if self.config.external_process_socket:
+                status = self._external_process_request({"op": "status"})
+                server_kind = status.get("kind")
+                server_capacity = float(status.get("capacity", 0.0))
+                server_max_workers = int(status.get("max_workers", 0))
+                if server_kind != self.config.kind:
+                    raise RuntimeError(
+                        "External resource pressure kind mismatch: "
+                        f"controller={self.config.kind}, server={server_kind}."
+                    )
+                if self.config.kind == "io" and self._io_capacity_gbps is None:
+                    self._io_capacity_gbps = server_capacity
+                elif not math.isclose(
+                    server_capacity,
+                    self._process_capacity(),
+                    rel_tol=1e-6,
+                    abs_tol=1e-6,
+                ):
+                    raise RuntimeError(
+                        "External resource pressure capacity mismatch: "
+                        f"controller={self._process_capacity():g}, "
+                        f"server={server_capacity:g}."
+                    )
             if self.config.kind == "io" and self._io_capacity_gbps is None:
                 raise ValueError(
                     "IO process pressure needs a PCIe baseline. "
@@ -221,7 +261,15 @@ class ResourcePressureController:
                     "--resource-pressure-io-calibration-s > 0."
                 )
             self._max_process_worker_count = self._max_process_workers_for_pattern()
-            self._set_process_pool_size(self._max_process_worker_count)
+            if self.config.external_process_socket:
+                if server_max_workers < self._max_process_worker_count:
+                    raise RuntimeError(
+                        "External resource pressure server has too few workers: "
+                        f"need {self._max_process_worker_count}, "
+                        f"server has {server_max_workers}."
+                    )
+            else:
+                self._set_process_pool_size(self._max_process_worker_count)
 
         self._open_logs()
 
@@ -285,14 +333,20 @@ class ResourcePressureController:
         if self._worker is not None:
             self._worker.join(timeout=5.0)
             self._worker = None
-        self._set_process_worker_count(0)
-        self._set_process_pool_size(0)
+        try:
+            self._set_process_worker_count(0)
+        finally:
+            if self.config.external_process_socket:
+                self._close_external_process_client()
+            else:
+                self._set_process_pool_size(0)
         if self._throttle is not None:
             self._throttle.disable()
             set_throttle(None)
         if self._log_file is not None:
             self._log_file.close()
             self._log_file = None
+            self._csv_writer = None
         if self._step_log_file is not None:
             self._step_log_file.close()
             self._step_log_file = None
@@ -423,7 +477,10 @@ class ResourcePressureController:
 
     def _max_process_workers_for_pattern(self) -> int:
         return max(
-            (self._process_worker_count_for_target(target) for _, target in self._pattern),
+            (
+                self._process_worker_count_for_target(target)
+                for _, target in self._pattern
+            ),
             default=0,
         )
 
@@ -431,6 +488,24 @@ class ResourcePressureController:
         if self.config.mode != "process":
             return 0.0
         count = max(0, int(count))
+        if self.config.external_process_socket:
+            if count != self._process_worker_count:
+                response = self._external_process_request(
+                    {"op": "set_worker_count", "count": count}
+                )
+                self._process_worker_count = int(response["worker_count"])
+                actual = float(response["actual"])
+            else:
+                baseline = self._process_capacity()
+                actual = (
+                    baseline
+                    if count <= 0
+                    else baseline / float(count + 1)
+                )
+            self._write_pressure_sample(
+                time.perf_counter(), self._current_target, actual
+            )
+            return actual
         if count > len(self._processes):
             self._set_process_pool_size(count)
         for idx, active_event in enumerate(self._process_active_events):
@@ -444,7 +519,65 @@ class ResourcePressureController:
         self._write_pressure_sample(time.perf_counter(), self._current_target, actual)
         return actual
 
+    def _external_process_request(
+        self, request: dict[str, str | int]
+    ) -> dict[str, object]:
+        path = self.config.external_process_socket
+        if not path:
+            raise RuntimeError("External resource pressure socket is not configured.")
+        if self._external_process_client is None:
+            try:
+                client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                client.settimeout(10.0)
+                client.connect(path)
+            except OSError as exc:
+                if "client" in locals():
+                    client.close()
+                raise RuntimeError(
+                    f"Could not connect to resource pressure server at {path}: {exc}"
+                ) from exc
+            self._external_process_client = client
+            self._external_process_reader = client.makefile("rb")
+
+        assert self._external_process_client is not None
+        assert self._external_process_reader is not None
+        try:
+            payload = (json.dumps(request) + "\n").encode()
+            self._external_process_client.sendall(payload)
+            response_line = self._external_process_reader.readline()
+        except OSError as exc:
+            self._close_external_process_client()
+            raise RuntimeError(
+                f"Resource pressure server request failed: {exc}"
+            ) from exc
+        if not response_line:
+            self._close_external_process_client()
+            raise RuntimeError("Resource pressure server closed the control socket.")
+        try:
+            response = json.loads(response_line)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                "Resource pressure server returned malformed JSON: "
+                f"{response_line!r}"
+            ) from exc
+        if not isinstance(response, dict) or not response.get("ok"):
+            error = response.get("error", "unknown error")
+            raise RuntimeError(f"Resource pressure server rejected request: {error}")
+        return response
+
+    def _close_external_process_client(self) -> None:
+        if self._external_process_reader is not None:
+            self._external_process_reader.close()
+            self._external_process_reader = None
+        if self._external_process_client is not None:
+            self._external_process_client.close()
+            self._external_process_client = None
+
     def _set_process_pool_size(self, count: int) -> None:
+        if self.config.external_process_socket:
+            raise RuntimeError(
+                "External resource pressure must be resized through its server."
+            )
         count = max(0, int(count))
         while len(self._processes) > count:
             process = self._processes.pop()
@@ -482,7 +615,9 @@ class ResourcePressureController:
                     "ready_event": ready_event,
                 }
             else:
-                raise ValueError(f"Unsupported process pressure kind: {self.config.kind}")
+                raise ValueError(
+                    f"Unsupported process pressure kind: {self.config.kind}"
+                )
             process = self._mp_context.Process(
                 target=target,
                 kwargs=kwargs,
@@ -560,7 +695,9 @@ class ResourcePressureController:
             self._stream.synchronize()
         return min(max(target_percent, 0.0), 100.0)
 
-    def _write_pressure_sample(self, start_s: float, target: float, actual: float) -> None:
+    def _write_pressure_sample(
+        self, start_s: float, target: float, actual: float
+    ) -> None:
         if self._csv_writer is None:
             return
         elapsed = 0.0 if self._start_s is None else start_s - self._start_s

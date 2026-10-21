@@ -117,7 +117,72 @@ def run_feedback_observation(
     )
     enable_profile = os.environ.get("ENABLE_PROFILE", "0") == "1"
     enable_nsys = os.environ.get("ENABLE_NSYS", "0") == "1"
+    resource_pressure_kind = os.environ.get("RESOURCE_PRESSURE_KIND", "none")
+    resource_pressure_clock = os.environ.get("RESOURCE_PRESSURE_CLOCK", "step")
+    resource_pressure_pattern = os.environ.get(
+        "RESOURCE_PRESSURE_PATTERN", "0:0"
+    )
+    resource_pressure_log_path = os.environ.get(
+        "RESOURCE_PRESSURE_LOG_PATH", ""
+    )
+    resource_pressure_step_log_path = os.environ.get(
+        "RESOURCE_PRESSURE_STEP_LOG_PATH", ""
+    )
+    resource_pressure_device = os.environ.get(
+        "RESOURCE_PRESSURE_DEVICE", "cuda:0"
+    )
+    resource_pressure_buffer_mb = os.environ.get(
+        "RESOURCE_PRESSURE_BUFFER_MB", "256"
+    )
+    resource_pressure_direction = os.environ.get(
+        "RESOURCE_PRESSURE_DIRECTION", "h2d"
+    )
+    resource_pressure_matrix_size = os.environ.get(
+        "RESOURCE_PRESSURE_MATRIX_SIZE", "4096"
+    )
+    resource_pressure_dtype = os.environ.get(
+        "RESOURCE_PRESSURE_DTYPE", "float16"
+    )
+    resource_pressure_window_s = os.environ.get(
+        "RESOURCE_PRESSURE_WINDOW_S", "0.25"
+    )
+    resource_pressure_period_ms = os.environ.get(
+        "RESOURCE_PRESSURE_PERIOD_MS", "100.0"
+    )
+    resource_pressure_max_fraction = os.environ.get(
+        "RESOURCE_PRESSURE_MAX_FRACTION", "0.5"
+    )
+    resource_pressure_io_calibration_s = os.environ.get(
+        "RESOURCE_PRESSURE_IO_CALIBRATION_S", "0.5"
+    )
+    resource_pressure_io_max_gbps = os.environ.get(
+        "RESOURCE_PRESSURE_IO_MAX_GBPS", ""
+    )
+    resource_pressure_mode = os.environ.get(
+        "RESOURCE_PRESSURE_MODE", "thread"
+    )
+    resource_pressure_inline_layer_period_ms = os.environ.get(
+        "RESOURCE_PRESSURE_INLINE_LAYER_PERIOD_MS", "5.0"
+    )
+    resource_pressure_external_process_socket = os.environ.get(
+        "RESOURCE_PRESSURE_EXTERNAL_PROCESS_SOCKET", ""
+    )
+    resource_pressure_process_placement = os.environ.get(
+        "RESOURCE_PRESSURE_PROCESS_PLACEMENT",
+        "external_sibling"
+        if resource_pressure_external_process_socket
+        else (
+            "target_process_child"
+            if resource_pressure_mode == "process"
+            else "in_target_process"
+        ),
+    )
+    step_metrics_path = os.environ.get("STEP_METRICS_PATH", "")
     nsys_cmd = os.environ.get("NSYS_CMD", "nsys")
+    nsys_profile_scope = os.environ.get(
+        "NSYS_PROFILE_SCOPE",
+        "target_process_tree" if enable_nsys else "disabled",
+    )
     run_tag = os.environ.get(
         "RUN_TAG",
         datetime.now().strftime("%Y%m%d_%H%M%S"),
@@ -207,6 +272,42 @@ def run_feedback_observation(
         cmd.append("--enable-layerwise-nvtx-tracing")
     if enable_profile:
         cmd.append("--profile")
+    for option, value in (
+        ("--resource-pressure-kind", resource_pressure_kind),
+        ("--resource-pressure-clock", resource_pressure_clock),
+        ("--resource-pressure-pattern", resource_pressure_pattern),
+        ("--resource-pressure-device", resource_pressure_device),
+        ("--resource-pressure-buffer-mb", resource_pressure_buffer_mb),
+        ("--resource-pressure-direction", resource_pressure_direction),
+        ("--resource-pressure-matrix-size", resource_pressure_matrix_size),
+        ("--resource-pressure-dtype", resource_pressure_dtype),
+        ("--resource-pressure-window-s", resource_pressure_window_s),
+        ("--resource-pressure-period-ms", resource_pressure_period_ms),
+        ("--resource-pressure-max-fraction", resource_pressure_max_fraction),
+        (
+            "--resource-pressure-io-calibration-s",
+            resource_pressure_io_calibration_s,
+        ),
+        ("--resource-pressure-mode", resource_pressure_mode),
+        (
+            "--resource-pressure-inline-layer-period-ms",
+            resource_pressure_inline_layer_period_ms,
+        ),
+        (
+            "--resource-pressure-external-process-socket",
+            resource_pressure_external_process_socket,
+        ),
+        ("--resource-pressure-log-path", resource_pressure_log_path),
+        ("--resource-pressure-step-log-path", resource_pressure_step_log_path),
+    ):
+        if value:
+            cmd.extend([option, value])
+    if resource_pressure_io_max_gbps:
+        cmd.extend(
+            ["--resource-pressure-io-max-gbps", resource_pressure_io_max_gbps]
+        )
+    if step_metrics_path:
+        cmd.extend(["--step-metrics-path", step_metrics_path])
     if passthrough_args:
         cmd.extend(passthrough_args)
 
@@ -226,6 +327,18 @@ def run_feedback_observation(
     print(f"  nvtx_scopes: {int(enable_nvtx)}")
     print(f"  layerwise_nvtx: {int(enable_layerwise_nvtx)}")
     print(f"  cuda_profiler_capture: {int(enable_profile)}")
+    print(f"  resource_pressure_kind: {resource_pressure_kind}")
+    if resource_pressure_kind != "none":
+        print(f"  resource_pressure_clock: {resource_pressure_clock}")
+        print(f"  resource_pressure_pattern: {resource_pressure_pattern}")
+        print(f"  resource_pressure_mode: {resource_pressure_mode}")
+        print(
+            "  resource_pressure_process_placement: "
+            f"{resource_pressure_process_placement}"
+        )
+        if resource_pressure_kind == "io":
+            print(f"  resource_pressure_direction: {resource_pressure_direction}")
+            print(f"  resource_pressure_io_max_gbps: {resource_pressure_io_max_gbps}")
     print(f"  prefix_blocks: {prefix_blocks}")
     print(f"  prompt_word: {prompt_word}")
     print(f"  gpu_memory_fraction: {gpu_memory_fraction}")
@@ -244,6 +357,7 @@ def run_feedback_observation(
     print(f"  output_dir: {output_dir}")
     print(f"  suggested_nsys_stem: {nsys_stem}")
     print(f"  enable_nsys: {int(enable_nsys)}")
+    print(f"  nsys_profile_scope: {nsys_profile_scope}")
     if passthrough_args:
         print(f"  passthrough_args: {' '.join(passthrough_args)}")
     print()
@@ -303,10 +417,40 @@ def run_feedback_observation(
             "h2d_copy_mode": h2d_copy_mode,
             "layer_recompute_use_state_machine": use_state_machine,
             "layer_recompute_replay_allocation_policy": replay_allocation_policy,
+            "resource_pressure_kind": resource_pressure_kind,
+            "resource_pressure_clock": resource_pressure_clock,
+            "resource_pressure_pattern": resource_pressure_pattern,
+            "resource_pressure_log_path": resource_pressure_log_path or None,
+            "resource_pressure_step_log_path": (
+                resource_pressure_step_log_path or None
+            ),
+            "resource_pressure_device": resource_pressure_device,
+            "resource_pressure_buffer_mb": resource_pressure_buffer_mb,
+            "resource_pressure_direction": resource_pressure_direction,
+            "resource_pressure_matrix_size": resource_pressure_matrix_size,
+            "resource_pressure_dtype": resource_pressure_dtype,
+            "resource_pressure_window_s": resource_pressure_window_s,
+            "resource_pressure_period_ms": resource_pressure_period_ms,
+            "resource_pressure_max_fraction": resource_pressure_max_fraction,
+            "resource_pressure_io_calibration_s": (
+                resource_pressure_io_calibration_s
+            ),
+            "resource_pressure_io_max_gbps": (
+                resource_pressure_io_max_gbps or None
+            ),
+            "resource_pressure_mode": resource_pressure_mode,
+            "resource_pressure_process_placement": (
+                resource_pressure_process_placement
+            ),
+            "resource_pressure_inline_layer_period_ms": (
+                resource_pressure_inline_layer_period_ms
+            ),
+            "step_metrics_path": step_metrics_path or None,
             "model": model,
             "nsys_report": str(Path(nsys_stem + ".nsys-rep").resolve())
             if enable_nsys
             else None,
+            "nsys_profile_scope": nsys_profile_scope,
             "mfu_jsonl_glob": str(
                 Path(output_dir)
                 / f"{component_artifact_prefix}_*_{run_tag}.jsonl"

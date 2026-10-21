@@ -341,6 +341,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "state layer time observed in a baseline run."
         ),
     )
+    parser.add_argument(
+        "--resource-pressure-external-process-socket",
+        default=None,
+        help=(
+            "Unix socket of an externally owned process-pressure pool. This "
+            "keeps contention CUDA workers outside the profiled process tree."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -700,6 +708,9 @@ def _make_resource_controller(
         mode=getattr(args, "resource_pressure_mode", "thread"),
         inline_layer_period_ms=getattr(
             args, "resource_pressure_inline_layer_period_ms", 5.0
+        ),
+        external_process_socket=getattr(
+            args, "resource_pressure_external_process_socket", None
         ),
     )
     return ResourcePressureController(config)
