@@ -486,7 +486,7 @@ class PagedBlockMapper:
         gpu_buffers: dict[int, torch.Tensor],
         cpu_caches_per_layer: dict[str, torch.Tensor],
         device: torch.device,
-        h2d_copy_mode: Literal["segment", "gather"] = "segment",
+        h2d_copy_mode: Literal["segment", "gather", "uva"] = "segment",
     ) -> None:
         """Initialize the PagedBlockMapper.
 
@@ -504,7 +504,7 @@ class PagedBlockMapper:
         self.gpu_buffers = gpu_buffers
         self.cpu_caches_per_layer = cpu_caches_per_layer
         self.device = device
-        if h2d_copy_mode not in ("segment", "gather"):
+        if h2d_copy_mode not in ("segment", "gather", "uva"):
             raise ValueError(f"Unsupported RunKV H2D copy mode: {h2d_copy_mode!r}")
         self.h2d_copy_mode = h2d_copy_mode
 
@@ -573,17 +573,22 @@ class PagedBlockMapper:
         self._dirty_dst_indices_pinned = torch.empty(
             max_indices, dtype=torch.int64, device="cpu", pin_memory=True
         )
-        if self.h2d_copy_mode == "gather":
+        if self.h2d_copy_mode in ("gather", "uva"):
             self._src_indices_pinned = torch.empty(
                 max_indices, dtype=torch.int64, device="cpu", pin_memory=True
             )
             self._dst_indices_pinned = torch.empty(
                 max_indices, dtype=torch.int64, device="cpu", pin_memory=True
             )
+        if self.h2d_copy_mode == "gather":
             self._h2d_pinned_staging = torch.empty_like(
                 any_buffer, device="cpu", pin_memory=True
             )
-            self._h2d_gpu_staging = torch.empty_like(any_buffer)
+            # Allocate the GPU scatter scratch lazily from the actual copy
+            # count. A full-capacity tensor duplicates an entire RunKV device
+            # buffer (several GiB for large staging settings) even when a step
+            # touches only a small subset of blocks.
+            self._h2d_gpu_staging: torch.Tensor | None = None
             self._scatter_indices_gpu = torch.empty(
                 max_indices, dtype=torch.int64, device=device
             )
@@ -593,8 +598,13 @@ class PagedBlockMapper:
         batch_copy_fn = _get_runkv_batch_copy()
         self.use_batch_copy = batch_copy_fn is not None
         self._batch_copy_fn = batch_copy_fn
+        if self.h2d_copy_mode == "uva" and not self.use_batch_copy:
+            raise RuntimeError(
+                "RunKV UVA H2D copy mode requires runkv_kernels.batch_copy_blocks. "
+                "Build it with: python setup_runkv.py build_ext --inplace"
+            )
         logger.info(
-            "RunKV: %s DMA H2D (max %d blocks), UVA D2H kernel %s",
+            "RunKV: %s H2D copy (max %d blocks), UVA D2H kernel %s",
             self.h2d_copy_mode,
             max_indices,
             "available" if self.use_batch_copy else "unavailable (per-block fallback)",
@@ -711,7 +721,9 @@ class PagedBlockMapper:
                         staging[:copy_count], non_blocking=True
                     )
                 else:
-                    gpu_stg = self._h2d_gpu_staging
+                    gpu_stg = self._ensure_h2d_gpu_staging(
+                        gpu_buffer, copy_count
+                    )
                     gpu_stg[:copy_count].copy_(
                         staging[:copy_count], non_blocking=True
                     )
@@ -741,7 +753,7 @@ class PagedBlockMapper:
                         staging[outer, :copy_count], non_blocking=True
                     )
             else:
-                gpu_stg = self._h2d_gpu_staging
+                gpu_stg = self._ensure_h2d_gpu_staging(gpu_buffer, copy_count)
                 for outer in range(outer_size):
                     gpu_stg[outer, :copy_count].copy_(
                         staging[outer, :copy_count], non_blocking=True
@@ -755,6 +767,28 @@ class PagedBlockMapper:
                         self._scatter_indices_gpu[:copy_count],
                         gpu_stg[outer, :copy_count],
                     )
+
+    def _ensure_h2d_gpu_staging(
+        self,
+        gpu_buffer: torch.Tensor,
+        copy_count: int,
+    ) -> torch.Tensor:
+        staging = self._h2d_gpu_staging
+        if staging is not None and staging.shape[self._blocks_dim] >= copy_count:
+            return staging
+
+        target_blocks = min(
+            self.capacity,
+            1 << max(copy_count - 1, 0).bit_length(),
+        )
+        shape = list(gpu_buffer.shape)
+        shape[self._blocks_dim] = target_blocks
+        self._h2d_gpu_staging = torch.empty(
+            shape,
+            dtype=gpu_buffer.dtype,
+            device=gpu_buffer.device,
+        )
+        return self._h2d_gpu_staging
 
     def _assign_slots(self, logical_block_ids: list[int]) -> None:
         """Assign GPU staging slots for the given logical blocks.
@@ -932,6 +966,7 @@ class PagedBlockMapper:
                     "segment_build": 0.0,
                     "mseg_dma": 0.0,
                     "gather_dma": 0.0,
+                    "uva_batch_copy": 0.0,
                     "event": 0.0,
                     "copy_count": 0,
                     "num_segments": 0,
@@ -1107,6 +1142,37 @@ class PagedBlockMapper:
                             * cpu_cache[:, 0].numel()
                         )
                     bytes_total = copy_count * bytes_per_block
+                elif copy_count and self.h2d_copy_mode == "uva":
+                    self._src_indices_pinned[:copy_count].copy_(
+                        torch.tensor(load_ids, dtype=torch.int64)
+                    )
+                    self._dst_indices_pinned[:copy_count].copy_(
+                        torch.tensor(
+                            [self.mapping[lid] for lid in load_ids],
+                            dtype=torch.int64,
+                        )
+                    )
+                    with record_function_or_nullcontext(
+                        f"runkv:uva_batch_copy:L{layer_idx}:{copy_count}blk"
+                    ):
+                        assert self._batch_copy_fn is not None
+                        self._batch_copy_fn(
+                            gpu_buffer,
+                            cpu_cache,
+                            self._dst_indices_pinned[:copy_count],
+                            self._src_indices_pinned[:copy_count],
+                            self._blocks_dim,
+                        )
+                    if self._blocks_dim == 0:
+                        bytes_per_block = (
+                            cpu_cache[0].element_size() * cpu_cache[0].numel()
+                        )
+                    else:
+                        bytes_per_block = (
+                            cpu_cache[:, 0].element_size()
+                            * cpu_cache[:, 0].numel()
+                        )
+                    bytes_total = copy_count * bytes_per_block
                 # Throttle the load stream's effective bandwidth to the
                 # configured target by pairing the just-issued copies with a
                 # parallel _sleep on a per-stream aux stream and gating the
@@ -1115,12 +1181,15 @@ class PagedBlockMapper:
                 throttle_after_copy_if_enabled(self.load_stream, bytes_total)
                 if _t:
                     copy_time = _time.perf_counter() - _tg0
-                    if self.h2d_copy_mode == "segment":
-                        self._last_timing["mseg_dma"] = copy_time
-                        self._last_timing["gather_dma"] = 0.0
-                    else:
-                        self._last_timing["mseg_dma"] = 0.0
-                        self._last_timing["gather_dma"] = copy_time
+                    self._last_timing["mseg_dma"] = (
+                        copy_time if self.h2d_copy_mode == "segment" else 0.0
+                    )
+                    self._last_timing["gather_dma"] = (
+                        copy_time if self.h2d_copy_mode == "gather" else 0.0
+                    )
+                    self._last_timing["uva_batch_copy"] = (
+                        copy_time if self.h2d_copy_mode == "uva" else 0.0
+                    )
                     self._last_timing["copy_count"] = copy_count
                     self._last_timing["num_segments"] = len(segments)
 
@@ -1552,6 +1621,7 @@ class GPUModelRunner(
         self._prehook_t_sio_segment_build: float = 0.0
         self._prehook_t_sio_mseg_dma: float = 0.0
         self._prehook_t_sio_gather_dma: float = 0.0
+        self._prehook_t_sio_uva_batch_copy: float = 0.0
         self._prehook_t_sio_event: float = 0.0
         # -- cpu_fill_h2d_async sub-parts --
         self._prehook_t_sio_cf_prepare: float = 0.0
@@ -3281,6 +3351,7 @@ class GPUModelRunner(
             "sio_segment_build_ms",
             "sio_mseg_dma_ms",
             "sio_gather_dma_ms",
+            "sio_uva_batch_copy_ms",
             "sio_event_ms",
             "sio_cf_prepare_ms",
             "sio_cf_gather_ms",
@@ -4119,6 +4190,9 @@ class GPUModelRunner(
                             self._prehook_t_sio_mseg_dma += _la.get("mseg_dma", 0.0)
                             self._prehook_t_sio_gather_dma += _la.get(
                                 "gather_dma", 0.0
+                            )
+                            self._prehook_t_sio_uva_batch_copy += _la.get(
+                                "uva_batch_copy", 0.0
                             )
                             self._prehook_t_sio_event += _la.get("event", 0.0)
                             # Collect cpu_fill sub-timings only when
@@ -6253,6 +6327,7 @@ class GPUModelRunner(
                 self._prehook_t_sio_segment_build
                 + self._prehook_t_sio_mseg_dma
                 + self._prehook_t_sio_gather_dma
+                + self._prehook_t_sio_uva_batch_copy
                 + self._prehook_t_sio_event
                 + self._prehook_t_sio_cf_prepare
                 + self._prehook_t_sio_cf_gather
@@ -6274,6 +6349,9 @@ class GPUModelRunner(
                     "sio_segment_build_ms": self._prehook_t_sio_segment_build * 1000,
                     "sio_mseg_dma_ms": self._prehook_t_sio_mseg_dma * 1000,
                     "sio_gather_dma_ms": self._prehook_t_sio_gather_dma * 1000,
+                    "sio_uva_batch_copy_ms": (
+                        self._prehook_t_sio_uva_batch_copy * 1000
+                    ),
                     "sio_event_ms": self._prehook_t_sio_event * 1000,
                     "sio_cf_prepare_ms": self._prehook_t_sio_cf_prepare * 1000,
                     "sio_cf_gather_ms": self._prehook_t_sio_cf_gather * 1000,
@@ -6312,6 +6390,7 @@ class GPUModelRunner(
             self._prehook_t_sio_segment_build = 0.0
             self._prehook_t_sio_mseg_dma = 0.0
             self._prehook_t_sio_gather_dma = 0.0
+            self._prehook_t_sio_uva_batch_copy = 0.0
             self._prehook_t_sio_event = 0.0
             self._prehook_t_sio_cf_prepare = 0.0
             self._prehook_t_sio_cf_gather = 0.0

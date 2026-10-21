@@ -100,7 +100,7 @@ def run_feedback_observation(
         )
     async_plan_build = os.environ.get("ASYNC_PLAN_BUILD", "1") == "1"
     h2d_copy_mode = os.environ.get("H2D_COPY_MODE", "segment")
-    if h2d_copy_mode not in ("segment", "gather"):
+    if h2d_copy_mode not in ("segment", "gather", "uva"):
         raise ValueError(f"Unsupported H2D_COPY_MODE: {h2d_copy_mode!r}")
     tightllm_profile_path = os.environ.get("TIGHTLLM_PROFILE_PATH", "")
     tightllm_feedback_correction = (

@@ -16,7 +16,7 @@ from typing import Any, Sequence
 ROOT = Path(__file__).resolve().parents[1]
 PIPELINE = ROOT / "scripts/run_benchmark_pipeline.py"
 DEFAULT_LOG_ROOT = ROOT / "exp_results/logs/benchmark_batch"
-H2D_COPY_MODES = ("segment", "gather")
+H2D_COPY_MODES = ("segment", "gather", "uva")
 REPLAY_ALLOCATION_POLICIES = ("spread", "concentrate")
 TIGHTLLM_ALLOCATION_POLICIES = ("concentrate", "spread")
 

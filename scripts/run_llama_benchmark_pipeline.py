@@ -137,7 +137,9 @@ def build_parser() -> argparse.ArgumentParser:
     test.add_argument("--cpu-memory-gb", type=float, default=47.9)
     test.add_argument("--cpu-memory-fraction", type=float, default=0.8)
     test.add_argument(
-        "--h2d-copy-mode", choices=("segment", "gather"), default="segment"
+        "--h2d-copy-mode",
+        choices=("segment", "gather", "uva"),
+        default="segment",
     )
     test.add_argument(
         "--replay-allocation-policy",
@@ -146,7 +148,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     test.add_argument(
         "--tightllm-h2d-copy-mode",
-        choices=("segment", "gather"),
+        choices=("segment", "gather", "uva"),
         default="segment",
     )
     test.add_argument(

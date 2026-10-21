@@ -95,9 +95,9 @@ BOOLEAN_OPTIONS = {
 }
 CHOICES = {
     "planner": {"feedback", "static"},
-    "h2d_copy_mode": {"segment", "gather"},
+    "h2d_copy_mode": {"segment", "gather", "uva"},
     "replay_allocation_policy": {"spread", "concentrate"},
-    "tightllm_h2d_copy_mode": {"segment", "gather"},
+    "tightllm_h2d_copy_mode": {"segment", "gather", "uva"},
     "tightllm_replay_allocation_policy": {"spread", "concentrate"},
 }
 META_FIELDS = {"name"}

@@ -144,9 +144,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--h2d-copy-mode",
-        choices=["segment", "gather"],
+        choices=["segment", "gather", "uva"],
         default="segment",
-        help="KV H2D staging implementation used by RunKV.",
+        help=(
+            "KV H2D staging implementation used by RunKV: segment DMA, "
+            "CPU gather + DMA, or GPU UVA batch copy."
+        ),
     )
     parser.add_argument(
         "--tightllm-profile-path",

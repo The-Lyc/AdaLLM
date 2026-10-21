@@ -352,7 +352,7 @@ def build_parser() -> argparse.ArgumentParser:
     test.add_argument("--num-device-buffers", default="3")
     test.add_argument(
         "--runkv-h2d-copy-mode",
-        choices=("segment", "gather"),
+        choices=("segment", "gather", "uva"),
         default="segment",
         help="KV H2D copy implementation for the RunKV benchmark step.",
     )
@@ -368,7 +368,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     test.add_argument(
         "--tightllm-h2d-copy-mode",
-        choices=("segment", "gather"),
+        choices=("segment", "gather", "uva"),
         default="segment",
         help="KV H2D copy implementation for the TightLLM benchmark step.",
     )

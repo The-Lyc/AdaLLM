@@ -729,6 +729,8 @@ def plot_imbalance(
 SIO_SEGMENTS = [
     ("sio_segment_build_ms", "seg_build"),
     ("sio_mseg_dma_ms", "mseg_dma"),
+    ("sio_gather_dma_ms", "gather_dma"),
+    ("sio_uva_batch_copy_ms", "uva_batch_copy"),
     ("sio_event_ms", "event"),
     ("sio_cf_prepare_ms", "cf_prepare"),
     ("sio_cf_gather_ms", "cf_gather"),

@@ -397,10 +397,11 @@ class TestPagedBlockMapper:
         assert torch.allclose(gpu_buffers[0][1].cpu(), torch.full((64,), -7.0))
 
     def test_load_layer_async_skip_blocks_batch_copy(self, setup_mapper):
-        """Batch-copy path should also skip specified logical blocks."""
+        """UVA batch-copy path should also skip specified logical blocks."""
         mapper, gpu_buffers, cpu_caches = setup_mapper
 
         # Force batch-copy path with a deterministic python mock.
+        mapper.h2d_copy_mode = "uva"
         mapper.use_batch_copy = True
         max_indices = mapper.capacity
         mapper._src_indices_pinned = torch.empty(
@@ -439,6 +440,35 @@ class TestPagedBlockMapper:
 
         assert torch.allclose(gpu_buffers[0][0].cpu(), cpu_caches["layer.0"][10])
         assert torch.allclose(gpu_buffers[0][1].cpu(), torch.full((64,), -9.0))
+
+    def test_gather_h2d_gpu_staging_is_lazy_and_sized_to_copy_count(
+        self, setup_mapper
+    ):
+        """CPU gather must not duplicate the full GPU staging capacity."""
+        _, gpu_buffers, cpu_caches = setup_mapper
+        mapper = PagedBlockMapper(
+            block_size=BLOCK_SIZE,
+            gpu_buffers=gpu_buffers,
+            cpu_caches_per_layer=cpu_caches,
+            device=DEVICE,
+            h2d_copy_mode="gather",
+        )
+        assert mapper._h2d_gpu_staging is None
+
+        cpu_caches["layer.0"][10].fill_(1)
+        cpu_caches["layer.0"][20].fill_(2)
+        cpu_caches["layer.0"][30].fill_(3)
+        mapper.mapping = {10: 0, 20: 1, 30: 2}
+        gpu_buffers[0][:3].fill_(-1)
+
+        mapper.load_layer_async("layer.0", layer_idx=0, skip_block_ids={20})
+        mapper.sync_load_layer(0)
+
+        assert mapper._h2d_gpu_staging is not None
+        assert mapper._h2d_gpu_staging.shape[mapper._blocks_dim] == 2
+        assert torch.allclose(gpu_buffers[0][0].cpu(), torch.ones(64))
+        assert torch.allclose(gpu_buffers[0][1].cpu(), torch.full((64,), -1.0))
+        assert torch.allclose(gpu_buffers[0][2].cpu(), torch.full((64,), 3.0))
 
     def test_ring_buffer_selection(self, setup_mapper):
         """Test that layers use ring buffers correctly."""
@@ -506,6 +536,14 @@ class TestRunKVOffloadConfig:
         assert config.layer_recompute_mode == "prev_layer_output_dynamic"
         assert config.layer_recompute_async_plan_build is False
         assert config.h2d_copy_mode == "gather"
+
+    def test_uva_h2d_config(self):
+        """Test selecting the GPU UVA batch-copy H2D implementation."""
+        from vllm.v1.core.kv_cache_offload_config import RunKVOffloadConfig
+
+        config = RunKVOffloadConfig(h2d_copy_mode="uva")
+
+        assert config.h2d_copy_mode == "uva"
 
 
 class TestRunKVMemorySizing:

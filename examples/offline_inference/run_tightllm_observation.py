@@ -29,7 +29,7 @@ Environment variables (all optional, with sensible defaults):
     MAX_TOKENS             max output tokens (default 32)
     GPU_MEMORY_FRACTION    KV offload GPU fraction (default 0.9)
     NUM_DEVICE_BUFFERS     DMA device buffers (default 3)
-    H2D_COPY_MODE          "segment" or CPU-gather "gather" (default segment)
+    H2D_COPY_MODE          "segment", CPU-gather "gather", or GPU-batch "uva"
     ENABLE_NVTX            "1" (default) to emit NVTX scopes
     ENABLE_LAYERWISE_NVTX  "1" to also emit per-module NVTX
     ENABLE_NSYS            "1" to wrap with nsys profile
@@ -119,7 +119,7 @@ def main() -> None:
     gpu_memory_fraction = os.environ.get("GPU_MEMORY_FRACTION", "0.9")
     num_device_buffers = os.environ.get("NUM_DEVICE_BUFFERS", "3")
     h2d_copy_mode = os.environ.get("H2D_COPY_MODE", "segment")
-    if h2d_copy_mode not in ("segment", "gather"):
+    if h2d_copy_mode not in ("segment", "gather", "uva"):
         raise ValueError(f"Unsupported H2D_COPY_MODE: {h2d_copy_mode!r}")
     gpu_memory_utilization = os.environ.get("GPU_MEMORY_UTILIZATION", "")
     max_num_seqs = os.environ.get("MAX_NUM_SEQS", "")

@@ -607,7 +607,7 @@ class EngineArgs:
     runkv_layer_recompute_planner: Literal["static", "feedback"] = "static"
     runkv_layer_recompute_planner_dry_run: bool = False
     runkv_layer_recompute_async_plan_build: bool = True
-    runkv_h2d_copy_mode: Literal["segment", "gather"] = "segment"
+    runkv_h2d_copy_mode: Literal["segment", "gather", "uva"] = "segment"
     runkv_layer_recompute_use_state_machine: bool = False
 
     # RunKV layer-wise KV cache offload configuration
@@ -1073,9 +1073,13 @@ class EngineArgs:
         )
         runkv_group.add_argument(
             "--runkv-h2d-copy-mode",
-            choices=["segment", "gather"],
+            choices=["segment", "gather", "uva"],
             default="segment",
-            help="KV H2D staging implementation for RunKV. Default: segment.",
+            help=(
+                "KV H2D staging implementation for RunKV: contiguous segment "
+                "DMA, CPU gather followed by DMA, or GPU UVA batch copy. "
+                "Default: segment."
+            ),
         )
 
         # Multimodal related configs

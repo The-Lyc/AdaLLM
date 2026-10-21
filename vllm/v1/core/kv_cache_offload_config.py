@@ -70,8 +70,9 @@ class RunKVOffloadConfig:
     layer_recompute_async_plan_build: bool = True
 
     # KV H2D staging implementation. "segment" copies contiguous logical
-    # ranges directly, while "gather" stages selected blocks before DMA.
-    h2d_copy_mode: Literal["segment", "gather"] = "segment"
+    # ranges directly, "gather" gathers selected blocks on the CPU before
+    # DMA, and "uva" uses the GPU UVA batch-copy kernel.
+    h2d_copy_mode: Literal["segment", "gather", "uva"] = "segment"
 
     # --- TightLLM planner settings ---
     # Path to offline profile JSON produced by tightllm_offline_profiler.
