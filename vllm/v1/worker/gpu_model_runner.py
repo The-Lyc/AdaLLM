@@ -1062,6 +1062,11 @@ class PagedBlockMapper:
                             "load_count": copy_count,
                             "num_segments": len(segments),
                             "cpu_cache_shape": cpu_shape,
+                            "cpu_cache_stride": list(cpu_cache.stride()),
+                            "cpu_cache_is_contiguous": cpu_cache.is_contiguous(),
+                            "gpu_buffer_shape": list(gpu_buffer.shape),
+                            "gpu_buffer_stride": list(gpu_buffer.stride()),
+                            "gpu_buffer_is_contiguous": gpu_buffer.is_contiguous(),
                             "cpu_cache_dtype": str(cpu_cache.dtype),
                         }
                     )
